@@ -1,0 +1,109 @@
+neighbor            2.0 bin
+neigh_modify        every 1 delay 0 check yes
+
+# Define variables
+variable    Tb file NBP_Pred.txt       # Predicted temperature K
+variable    eqmT equal 1.0*${Tb}       # run temperature
+variable 	eqmP equal 1.0
+variable    Tinit equal 250.0   	   # equilibration temperature
+variable    V equal vol
+variable    dt equal 4.0
+variable    p equal 100     		   # correlation length
+variable    s equal 10       		   # sample interval
+variable    d equal $p*$s   		   # dump interval
+variable 	rho equal density 		   # Average density
+variable    highT equal 1000          # High temperature T 
+variable    highTrun equal 50000       # High temperature run
+variable    nptRun equal 500000          # NPT run
+variable    nvtRun equal 100000          # NVT run
+variable    nveRun equal 500000          # NVE run
+
+
+# convert from LAMMPS real units to SI
+variable    kB equal 1.3806504e-23     # [J/K] Boltzmann
+variable    atm2Pa equal 101325.0
+variable    A2m equal 1.0e-10
+variable    fs2s equal 1.0e-15
+variable    convert equal ${atm2Pa}*${atm2Pa}*${fs2s}*${A2m}*${A2m}*${A2m}
+
+# setup problem
+
+#------------------------------Initialization Section------------------------------
+include "system.in.init"
+
+#------------------------------Atom Definition Section-----------------------------
+read_data "system.data"
+
+#------------------------------Run Section-----------------------------------------
+
+# equilibration and thermalization
+
+# Minimize system at target temperature using the default conjugate gradient method
+velocity            all create ${eqmT} 11111
+fix                 fmin all nve
+thermo              10
+thermo_style        custom step temp press density etotal enthalpy vol
+dump                1 all custom/gz 10 dump.equilibrium.gz id mol type x y z
+dump_modify         1 sort id
+minimize            1.0e-6 1.0e-6 100000 500000
+undump              1
+write_restart       equilibrium.restart
+
+unfix               fmin
+reset_timestep      0
+neigh_modify        every 1 delay 0 check yes
+
+# High temperature NVT simulation
+print "*******************************************************************************"
+print "######################## NVT at high temperature ###############################"
+print "*******************************************************************************"
+fix                 nvt1000K all nvt temp ${highT} ${highT} 100.0
+thermo              $d
+thermo_style        custom step temp press density pxx pyy pzz pxy pxz pyz pe ke etotal evdwl ecoul epair ebond eangle edihed eimp emol etail enthalpy vol
+run                 ${highTrun}
+unfix               nvt1000K
+
+# NPT equilibration and density calculation
+print "*******************************************************************************"
+print "######################## NPT at desired temperature ###############################"
+print "*******************************************************************************"
+fix                 NPT all npt temp ${eqmT} ${eqmT} 100.0 iso ${eqmP} ${eqmP} 25.0
+fix                 dave all ave/time $s $p $d v_rho ave running file eqmDensity1atm.log
+thermo              $d
+run                 ${nptRun}
+unfix               NPT
+unfix               dave
+
+# High temperature NVT simulation
+print "*******************************************************************************"
+print "######################## NVT at desired temperature ###############################"
+print "*******************************************************************************"
+fix                 nvt all nvt temp ${eqmT} ${eqmT} 100.0
+thermo              $d
+thermo_style        custom step temp press density pxx pyy pzz pxy pxz pyz pe ke etotal evdwl ecoul epair ebond eangle edihed eimp emol etail enthalpy vol
+run                 ${nvtRun}
+unfix               nvt
+
+# NVE ensemble for viscosity calculation
+print "*******************************************************************************"
+print "################ NVE: Direct Viscosity Calculation ###########################"
+print "*******************************************************************************"
+
+fix         NVE all nve
+fix 		thermostat all langevin ${eqmT} ${eqmT} 100.0 22222
+
+reset_timestep 0
+variable     pxy equal pxy
+variable     pxz equal pxz
+variable     pyz equal pyz
+fix          SS all ave/correlate $s $p $d &
+             v_pxy v_pxz v_pyz type auto file viscosity.txt ave running
+variable     scale equal ${convert}/(${kB}*${eqmT})*$V*$s*${dt}
+variable     v11 equal trap(f_SS[3])*${scale}
+variable     v22 equal trap(f_SS[4])*${scale}
+variable     v33 equal trap(f_SS[5])*${scale}
+thermo_style custom step temp press v_pxy v_pxz v_pyz v_v11 v_v22 v_v33 vol
+run          ${nveRun}
+variable     v equal (v_v11+v_v22+v_v33)/3.0
+variable     ndens equal count(all)/vol
+print        "average viscosity: ${v} [Pa.s] @ ${eqmT} K, ${ndens} atoms/A^3"
